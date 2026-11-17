@@ -2,6 +2,9 @@
 --  PARFÜM LAB · veritabanı kurulumu
 --  Supabase > SQL Editor > New query > bu dosyanın tamamını yapıştır > Run
 --  Tekrar çalıştırmak güvenlidir: var olan kayıtları silmez, değiştirmez.
+--  Sürüm 1.1: ayarlar, iptal nedeni, maliyet kaydı, stok kontrolü, sahip kilidi.
+--  Not: önce Authentication > Users bölümünden kendi kullanıcını oluştur, sonra çalıştır.
+--  O anda kayıtlı kullanıcılar veriye erişebilen sahip olarak işaretlenir.
 -- =====================================================================
 
 -- ---------- Malzemeler: hammadde, çözücü, çözelti ----------
@@ -161,18 +164,59 @@ create table if not exists public.evaluations (
   created_at    timestamptz not null default now()
 );
 
--- ---------- Erişim: yalnızca giriş yapmış kullanıcı ----------
+-- ---------- Ayarlar (terazi eşiği vb.) ----------
+create table if not exists public.settings (
+  id          uuid primary key default gen_random_uuid(),
+  key         text not null unique,
+  value       jsonb,
+  updated_at  timestamptz not null default now(),
+  created_at  timestamptz not null default now()
+);
+
+-- ---------- Sürüm 1.1 sütunları ----------
+alter table public.productions add column if not exists void_reason text;
+alter table public.production_lines add column if not exists unit_cost numeric;
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'productions_void_reason_chk') then
+    alter table public.productions add constraint productions_void_reason_chk check (void_reason in ('error','discarded'));
+  end if;
+end $$;
+
+-- ---------- Erişim: yalnızca sahip kullanıcı ----------
+create table if not exists public.app_owner (
+  user_id     uuid primary key,
+  created_at  timestamptz not null default now()
+);
+alter table public.app_owner enable row level security;
+revoke all on public.app_owner from anon, authenticated;
+insert into public.app_owner (user_id) select id from auth.users on conflict (user_id) do nothing;
+
+create or replace function public.is_owner()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select exists (select 1 from public.app_owner where user_id = auth.uid()) $$;
+revoke all on function public.is_owner() from public, anon;
+grant execute on function public.is_owner() to authenticated;
+
 do $$
 declare t text;
 begin
-  foreach t in array array['materials','movements','material_notes','perfumes','perfume_reviews',
-                           'formulas','formula_versions','formula_lines','productions','production_lines','evaluations'] loop
+  foreach t in array array['materials','movements','material_notes','perfumes','perfume_reviews','formulas',
+                           'formula_versions','formula_lines','productions','production_lines','evaluations','settings'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists sahip on public.%I', t);
-    execute format('create policy sahip on public.%I for all to authenticated using (true) with check (true)', t);
+    execute format('create policy sahip on public.%I for all to authenticated using (public.is_owner()) with check (public.is_owner())', t);
     execute format('revoke all on public.%I from anon', t);
     execute format('grant select, insert, update, delete on public.%I to authenticated', t);
   end loop;
+  -- Kayıt bütünlüğü: stok hareketleri ve tartım satırları yalnızca eklenir, değiştirilemez ve silinemez
+  revoke update, delete on public.movements from authenticated;
+  revoke update, delete on public.production_lines from authenticated;
+  revoke delete on public.productions from authenticated;
 end $$;
 
 -- ---------- Toplu kayıt: ya hepsi yazılır ya hiçbiri ----------
@@ -190,10 +234,12 @@ declare
   cols text;
   sets text;
   n    int;
-  can_insert constant text[] := array['materials','movements','material_notes','perfumes','perfume_reviews',
-                                      'formulas','formula_versions','formula_lines','productions','production_lines','evaluations'];
+  dec  uuid[] := '{}';
+  bad  record;
+  can_insert constant text[] := array['materials','movements','material_notes','perfumes','perfume_reviews','formulas',
+                                      'formula_versions','formula_lines','productions','production_lines','evaluations','settings'];
   can_update constant text[] := array['materials','material_notes','perfumes','perfume_reviews',
-                                      'formulas','formula_versions','formula_lines','productions','evaluations'];
+                                      'formulas','formula_versions','formula_lines','productions','evaluations','settings'];
   can_delete constant text[] := array['materials','material_notes','perfumes','perfume_reviews',
                                       'formulas','formula_versions','formula_lines','evaluations'];
 begin
@@ -212,6 +258,9 @@ begin
       if cols is null then raise exception 'boş kayıt: %', t; end if;
       execute format('insert into public.%I (%s) select %s from jsonb_populate_record(null::public.%I, $1)',
                      t, cols, cols, t) using r;
+      if t = 'movements' and coalesce((r->>'qty')::numeric, 0) < 0 then
+        dec := dec || (r->>'material_id')::uuid;
+      end if;
 
     elsif k = 'update' then
       if not (t = any(can_update)) then raise exception 'izin yok: % %', k, t; end if;
@@ -232,6 +281,17 @@ begin
     else
       raise exception 'bilinmeyen işlem: %', k;
     end if;
+  end loop;
+
+  -- Stok eksiye düşemez: azalan her malzeme kontrol edilir
+  for bad in
+    select m.name, s.total
+      from (select material_id, sum(qty) as total from public.movements
+             where material_id = any(dec) group by material_id) s
+      join public.materials m on m.id = s.material_id
+     where s.total < -0.000001
+  loop
+    raise exception 'stok yetersiz: % (% g olurdu)', bad.name, replace(round(bad.total, 2)::text, '.', ',');
   end loop;
 end $$;
 

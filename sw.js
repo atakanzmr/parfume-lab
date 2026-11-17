@@ -1,6 +1,6 @@
 /* Parfüm Lab · çevrimdışı açılış için önbellek.
    Uygulama dosyaları önbellekten açılır; veriler her zaman Supabase'den gelir. */
-const VERSION = 'pl-1.0.0';
+const VERSION = 'pl-1.1.0';
 const SHELL = ['./', './index.html', './config.js', './supabase.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
