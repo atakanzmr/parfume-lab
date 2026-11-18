@@ -1,18 +1,19 @@
 /* Parfüm Lab · çevrimdışı açılış için önbellek.
    Uygulama dosyaları önbellekten açılır; veriler her zaman Supabase'den gelir. */
-const VERSION = 'pl-1.2.0';
+const VERSION = 'pl-1.3.0';
 const SHELL = ['./', './index.html', './config.js', './supabase.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
+const MEDIA = ['./intro.mp4'];           // büyük dosya: kurulumu bekletmez, inince saklanır
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then((c) => { c.addAll(MEDIA).catch(() => {}); return c.addAll(SHELL); }).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys()
     .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
-const SHELL_PATHS = new Set(SHELL.map((p) => new URL(p, self.location).pathname));
+const SHELL_PATHS = new Set(SHELL.concat(MEDIA).map((p) => new URL(p, self.location).pathname));
 
 self.addEventListener('fetch', (e) => {
   const req = e.request; const url = new URL(req.url);
